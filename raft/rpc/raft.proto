@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-option go_package = "raft/rpc;
+option go_package = "raft/rpc";
 package rpc;
 
 service RaftRpc{
@@ -15,7 +15,7 @@ service RaftRpc{
 
     rpc AppendEntries(AppendEntriesReq) returns (AppendEntriesResp);
 
-    rpc InstallSnapshot(InstallSnapshotReq) returns (InstallSnapshotResp)
+    rpc InstallSnapshot(InstallSnapshotReq) returns (InstallSnapshotResp);
 }
 
 message RequestVoteReq{
