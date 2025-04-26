@@ -5,7 +5,7 @@ package rpc;
 
 service RaftRpc{
     /*
-        * RequestVote —— Raft 共识算法中候选人向其他节点请求投票的 RPC 方法。
+        * RequestVote —— Raft 共识算法中候选人向其他节点请求投票的 RPC 方法。在election.go中重写
         * 接收者需实现：
         * 1. 如果 term < currentTerm，返回 false。
         * 2. 如果 votedFor 为空或者为请求中的 candidateId，并且候选人的日志至少和自己一样新，则投票给它。

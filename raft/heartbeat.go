@@ -216,9 +216,163 @@ func (r *Raft) handleInstallSnapshotResp(sendLastLogIndex int, server int, resp 
 }
 
 /*
+* AppendEntries 心跳rpc
+* follower节点接收到leader节点的心跳包并回包
+ */
+func (r *Raft) AppendEntries(ctx context.Context, req *rpc.AppendEntriesReq) (*rpc.AppendEntriesResp, error) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.lastElectionTime = time.Now().UnixMilli() // 收到心跳包，更新选举时间
+	var resp *rpc.AppendEntriesResp
+	if int(req.Term) < r.currentTerm { // leader日志过期
+		resp.Term = int64(r.currentTerm)
+		resp.Success = false
+		log.Debugf("收到server:%d日志心跳，它的Term:%d比我的旧:%d，让它更新自己", req.LeaderId, req.Term, r.currentTerm)
+		return resp, nil
+	}
+
+	if int(req.Term) > r.currentTerm { // leader日志更新
+		r.currentTerm = int(req.Term)
+		r.status = common.Follower
+		r.setNodeInfoFollower(r.me)
+		r.votedFor = -1
+		r.saveState()
+	}
+	// req.Term == r.currentTerm
+	r.LeaderId = int(req.LeaderId)
+	r.setNodeInfoLeader(r.LeaderId) // 更新所有节点的身份
+	lastLogIndex, _ := r.getLastLogIndexAndTerm()
+	if req.PrevLogIndex != 0 {
+		if lastLogIndex < int(req.PrevLogIndex) { // 本节点不包含prevLogIndex，返回false
+			resp.Term = int64(r.currentTerm)
+			resp.Success = false
+			log.Debugf("收到server:%d日志心跳，prevLogIndex:%d还不存在，拒绝同步日志, lastLogIndex:%d", req.LeaderId, req.PrevLogIndex, lastLogIndex)
+			return resp, nil
+		}
+		// 1. Follower 选错 Leader，之前日志来自不同 Leader
+		// 2. Follower 崩溃恢复后，日志部分缺失或和 Leader 不一致
+		// 3. 网络分区导致日志分叉
+		term := r.getLogTermByIndex(int(req.PrevLogIndex))
+		if int(req.PrevLogTerm) != term { // 日志term与prevLogTerm不符合，返回false
+			resp.Term = int64(r.currentTerm)
+			resp.Success = false
+			log.Debugf("收到server:%d日志心跳，PrevLogTerm:%d不等于本节点相同位置处的Term:%d，日志不统一，拒绝同步日志", req.LeaderId, req.PrevLogTerm, term)
+			return resp, nil
+		}
+	}
+	if len(req.Entries) > 0 { // 日志不为空，更新日志
+		var notExistSliceIndex = -1
+		for i := 0; i < len(req.Entries); i++ { // 检查已经存在的日志条目和新的是否冲突
+			if !r.isExistLogByIndex(int(req.Entries[i].Index)) { // 不存在
+				notExistSliceIndex = i
+				break
+			}
+			localTerm := r.getLogTermByIndex(int(req.Entries[i].Index))
+			if int(req.Entries[i].Term) != localTerm { // 本地的entry和新的产生冲突，删除本地的entry及其只有所有的
+				sliceIndex := r.getSliceIndexByLogIndex(int(req.Entries[i].Index))
+				r.logs = r.logs[:sliceIndex]
+				notExistSliceIndex = i
+				break
+			}
+		}
+		if notExistSliceIndex != -1 { // 有冲突，删除本地的entry及其后面的所有entry
+			for i := notExistSliceIndex; i < len(req.Entries); i++ { // 附加尚未存在的新entry
+				r.logs = append(r.logs, common.LogEntry{
+					Command: req.Entries[i].Command,
+					Term:    int(req.Entries[i].Term),
+					Index:   int(req.Entries[i].Index),
+				})
+			}
+		}
+	}
+	// 更新commitIndex
+	if int(req.LeaderCommit) > r.commitIndex {
+		lastLogIndex, _ = r.getLastLogIndexAndTerm()
+		// 提交索引
+		r.commitIndex = min(int(req.LeaderCommit), lastLogIndex)
+		// 应用指令
+		r.applyLog()
+		r.persist()
+		r.saveState()
+		log.Debugf("日志索引:%d, 提交索引并应用", r.commitIndex)
+	}
+	resp.Term = int64(r.currentTerm)
+	resp.Success = true
+	log.Debugf("收到server:%d日志心跳，同意同步日志，所有节点状态: %v", req.LeaderId, r.GetNodeInfos())
+	return resp, nil
+}
+
+/*
+* InstallSnapshot 同步快照rpc
+ */
+func (r *Raft) InstallSnapshot(ctx context.Context, req *rpc.InstallSnapshotReq) (*rpc.InstallSnapshotResp, error) {
+	var resp rpc.InstallSnapshotResp
+	r.lastElectionTime = time.Now().UnixMilli() // 收到心跳，重置选举时间
+	if int(req.Term) < r.currentTerm {
+		resp.Term = int64(r.currentTerm)
+		log.Debugf("收到server:%d快照心跳，它的Term:%d比我的旧:%d，让它更新自己", req.LeaderId, req.Term, r.currentTerm)
+		return &resp, nil
+	} else if int(req.Term) > r.currentTerm {
+		r.currentTerm = int(req.Term)
+		r.status = common.Follower
+		r.setNodeInfoFollower(r.me)
+		r.votedFor = -1
+		r.saveState()
+	}
+	// term == r.currentTerm
+	if r.lastIncludeIndex != int(req.LastIncludeIndex) || r.lastIncludeTerm != int(req.LastIncludeTerm) { // 丢掉logs
+		r.logs = nil
+	}
+	r.replaceSnapshot(req.Data) // 丢弃旧的快照，存储新的快照
+	r.lastIncludeIndex = int(req.LastIncludeIndex)
+	r.lastIncludeTerm = int(req.LastIncludeTerm)
+	r.saveState()
+	// 重置状态机
+	r.Reset()
+	r.commitIndex = r.lastIncludeIndex
+	r.lastApplied = r.lastIncludeIndex
+	// 响应
+	resp.Term = int64(r.currentTerm)
+	log.Debugf("收到server:%d快照心跳，成功同步快照，commitIndex:%d", req.LeaderId, r.commitIndex)
+	return &resp, nil
+}
+
+/*
 * 获取某个 follower 的上一条日志索引
  */
 func (r *Raft) getServerPrevLogIndex(server int) (prevLogIndex int) {
 	prevLogIndex = r.nextIndex[server] - 1
 	return
+}
+
+/*
+* 快照覆盖了日志 1~100，那么你只保留从 101 以后 的日志在内存 log []Entry 中；
+* getSliceIndexByLogIndex的作用是将日志索引转换为切片索引
+ */
+func (r *Raft) getSliceIndexByLogIndex(logIndex int) (sliceIndex int) {
+	return logIndex - r.lastIncludeIndex - 1
+}
+
+/*
+* 判断日志条目是否存在
+ */
+func (r *Raft) isExistLogByIndex(logIndex int) bool {
+	if logIndex <= 0 {
+		return false
+	}
+	if i := r.getSliceIndexByLogIndex(logIndex); i >= len(r.logs) {
+		return false
+	}
+	return true
+}
+
+// 确保索引存在
+func (r *Raft) getLogTermByIndex(logIndex int) int {
+	if logIndex == 0 {
+		return 0
+	}
+	if logIndex == r.lastIncludeIndex {
+		return r.lastIncludeTerm
+	}
+	return r.logs[r.getSliceIndexByLogIndex(logIndex)].Term
 }

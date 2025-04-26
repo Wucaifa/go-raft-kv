@@ -9,7 +9,7 @@ const (
 
 	ElectionBaseTimeout     = 1500 // 选举基准超时时间（ms）
 	ElectionMaxExtraTimeout = 1500 // 选举额外最大超时时间（ms）
-	HeartbeatInterval       = 250  // 心跳间隔（ms）
+	HeartbeatTimeout        = 250  // 心跳间隔（ms）
 
 	RpcTimeout = 2000 // RPC超时时间（ms）
 )
@@ -22,8 +22,8 @@ type LogEntry struct {
 
 // State 代表 Raft 节点的状态
 type State struct {
-	CurrentTerm       int // 当前任期
-	VotedFor          int // 投票给的候选人ID
-	LastIncludedIndex int // 最后包含的日志条目的索引
-	LastIncludedTerm  int // 最后包含的日志条目的任期
+	CurrentTerm      int // 当前任期
+	VotedFor         int // 投票给的候选人ID
+	LastIncludeIndex int // 最后包含的日志条目的索引
+	LastIncludeTerm  int // 最后包含的日志条目的任期
 }
