@@ -1,4 +1,4 @@
-package main
+package global
 
 import (
 	kv_raft "go_raft_kv"
